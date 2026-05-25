@@ -1,9 +1,10 @@
 import json
+from http import HTTPStatus
 
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -11,13 +12,42 @@ from users.models import Skill
 from .forms import ProjectForm
 from .models import Project
 
+ITEMS_PER_PAGE = 12
+MAX_SKILLS_SUGGESTIONS = 10
+
+
+def paginate_queryset(request, queryset, items_per_page=ITEMS_PER_PAGE):
+    """Утилита для пагинации queryset"""
+    paginator = Paginator(queryset, items_per_page)
+    page_number = request.GET.get('page')
+    return paginator.get_page(page_number)
+
+
+def get_project_or_404_json(project_id, user=None):
+    """Получить проект или вернуть JsonResponse с ошибкой 404"""
+    try:
+        if user:
+            project = Project.objects.get(id=project_id, owner=user)
+        else:
+            project = Project.objects.get(id=project_id)
+        return project
+    except Project.DoesNotExist:
+        return None
+
+
+def get_skill_or_404_json(skill_id):
+    """Получить навык или вернуть JsonResponse с ошибкой 404"""
+    try:
+        return Skill.objects.get(id=skill_id)
+    except Skill.DoesNotExist:
+        return None
+
 
 def project_list(request):
     projects_list = Project.objects.select_related('owner').prefetch_related(
         'skills'
     ).order_by('-created_at')
 
-    # Передаем список названий навыков (строки), а не объектов
     all_skills = Skill.objects.values_list('name', flat=True).order_by('name')
     active_skill = request.GET.get('skill', '')
 
@@ -26,9 +56,7 @@ def project_list(request):
             skills__name=active_skill
         ).distinct()
 
-    paginator = Paginator(projects_list, 12)
-    page_number = request.GET.get('page')
-    page_obj = paginator.get_page(page_number)
+    page_obj = paginate_queryset(request, projects_list)
 
     query_prefix = f'skill={active_skill}&' if active_skill else ''
 
@@ -42,12 +70,13 @@ def project_list(request):
 
 
 def project_detail(request, project_id):
-    project = get_object_or_404(
-        Project.objects.select_related('owner').prefetch_related(
+    try:
+        project = Project.objects.select_related('owner').prefetch_related(
             'participants', 'skills'
-        ),
-        id=project_id,
-    )
+        ).get(id=project_id)
+    except Project.DoesNotExist:
+        return render(request, '404.html', status=404)
+
     context = {'project': project}
     return render(request, 'projects/project-details.html', context)
 
@@ -70,9 +99,11 @@ def create_project(request):
 
 @login_required
 def edit_project(request, project_id):
-    project = get_object_or_404(
-        Project, id=project_id, owner=request.user
-    )
+    try:
+        project = Project.objects.get(id=project_id, owner=request.user)
+    except Project.DoesNotExist:
+        return render(request, '404.html', status=404)
+
     if request.method == 'POST':
         form = ProjectForm(request.POST, instance=project)
         if form.is_valid():
@@ -87,8 +118,18 @@ def edit_project(request, project_id):
 @login_required
 @require_http_methods(["POST"])
 def toggle_participation(request, project_id):
-    project = get_object_or_404(Project, id=project_id)
-    if request.user in project.participants.all():
+    project = get_project_or_404_json(project_id)
+    if project is None:
+        return JsonResponse(
+            {'error': 'Project not found'},
+            status=HTTPStatus.NOT_FOUND
+        )
+
+    is_participant = project.participants.filter(
+        id=request.user.id
+    ).exists()
+
+    if is_participant:
         project.participants.remove(request.user)
         is_participant = False
     else:
@@ -96,7 +137,9 @@ def toggle_participation(request, project_id):
         is_participant = True
 
     participants_data = []
-    for member in project.participants.all():
+    for member in project.participants.only(
+        'id', 'name', 'surname', 'avatar'
+    ).all():
         participants_data.append({
             'id': member.id,
             'name': f'{member.name} {member.surname}',
@@ -115,12 +158,17 @@ def toggle_participation(request, project_id):
 @login_required
 @require_http_methods(["POST"])
 def complete_project(request, project_id):
-    project = get_object_or_404(
-        Project, id=project_id, owner=request.user
-    )
+    project = get_project_or_404_json(project_id, user=request.user)
+    if project is None:
+        return JsonResponse(
+            {'error': 'Project not found'},
+            status=HTTPStatus.NOT_FOUND
+        )
+
     if project.status == Project.OPEN:
         project.status = Project.CLOSED
         project.save()
+
     return JsonResponse({
         'status': 'ok',
         'project_status': project.status,
@@ -135,7 +183,8 @@ def skill_search(request):
 
     skills = Skill.objects.filter(
         name__icontains=query
-    ).order_by('name')[:10]
+    ).order_by('name')[:MAX_SKILLS_SUGGESTIONS]
+
     data = [{'id': skill.id, 'name': skill.name} for skill in skills]
     return JsonResponse(data, safe=False)
 
@@ -145,8 +194,11 @@ def skill_search(request):
 @csrf_exempt
 def add_skill(request, project_id):
     """Добавление навыка проекту"""
-    project = get_object_or_404(
-        Project, id=project_id, owner=request.user
+    project = get_project_or_404_json(project_id, user=request.user)
+    if project is None:
+        return JsonResponse(
+            {'error': 'Project not found'},
+            status=HTTPStatus.NOT_FOUND
         )
 
     try:
@@ -161,14 +213,17 @@ def add_skill(request, project_id):
     added = False
 
     if skill_id:
-        try:
-            skill = Skill.objects.get(id=skill_id)
-        except Skill.DoesNotExist:
-            return JsonResponse({'error': 'Skill not found'}, status=404)
+        skill = get_skill_or_404_json(skill_id)
+        if skill is None:
+            return JsonResponse(
+                {'error': 'Skill not found'},
+                status=HTTPStatus.NOT_FOUND
+            )
     else:
         skill, created = Skill.objects.get_or_create(name=name)
 
-    if skill not in project.skills.all():
+    skill_exists = project.skills.filter(id=skill.id).exists()
+    if not skill_exists:
         project.skills.add(skill)
         added = True
 
@@ -185,9 +240,19 @@ def add_skill(request, project_id):
 @csrf_exempt
 def remove_skill(request, project_id, skill_id):
     """Удаление навыка из проекта"""
-    project = get_object_or_404(
-        Project, id=project_id, owner=request.user
-    )
-    skill = get_object_or_404(Skill, id=skill_id)
+    project = get_project_or_404_json(project_id, user=request.user)
+    if project is None:
+        return JsonResponse(
+            {'error': 'Project not found'},
+            status=HTTPStatus.NOT_FOUND
+        )
+
+    skill = get_skill_or_404_json(skill_id)
+    if skill is None:
+        return JsonResponse(
+            {'error': 'Skill not found'},
+            status=HTTPStatus.NOT_FOUND
+        )
+
     project.skills.remove(skill)
     return JsonResponse({'status': 'ok'})

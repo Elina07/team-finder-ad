@@ -5,7 +5,7 @@ from django.contrib.auth.forms import PasswordChangeForm
 from django.core.exceptions import ValidationError
 
 from .models import User
-
+from .utils import validate_github_url, validate_phone
 
 PHONE_REGEX = r'^(\+7|8)\d{10}$'
 
@@ -53,27 +53,11 @@ class EditProfileForm(forms.ModelForm):
 
     def clean_phone(self):
         phone = self.cleaned_data.get('phone')
-        if not phone:
-            return phone
-        phone = phone.replace(' ', '').replace('-', '')
-        if not re.match(PHONE_REGEX, phone):
-            raise ValidationError(
-                'Введите номер в формате +7XXXXXXXXXX или 8XXXXXXXXXX.'
-            )
-        if phone.startswith('8'):
-            phone = '+7' + phone[1:]
-        exists = User.objects.exclude(
-            pk=self.instance.pk
-        ).filter(phone=phone).exists()
-        if exists:
-            raise ValidationError('Этот номер уже используется.')
-        return phone
+        return validate_phone(phone, self.instance.pk)
 
     def clean_github_url(self):
         github_url = self.cleaned_data.get('github_url')
-        if github_url and 'github.com' not in github_url:
-            raise ValidationError('Введите ссылку на GitHub.')
-        return github_url
+        return validate_github_url(github_url)
 
 
 class UserPasswordChangeForm(PasswordChangeForm):

@@ -1,6 +1,9 @@
 from django.conf import settings
 from django.db import models
+
 from users.models import Skill
+
+MAX_NAME_LENGTH = 200
 
 
 class Project(models.Model):
@@ -11,7 +14,7 @@ class Project(models.Model):
         (CLOSED, 'Closed'),
     )
 
-    name = models.CharField(max_length=200)
+    name = models.CharField(max_length=MAX_NAME_LENGTH)
     description = models.TextField(blank=True)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
