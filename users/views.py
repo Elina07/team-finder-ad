@@ -1,50 +1,193 @@
-from django.contrib.auth import login
-from django.contrib.auth import logout
+import json
+
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import PasswordChangeForm
-from django.contrib.auth import update_session_auth_hash
-from django.shortcuts import get_object_or_404
-from django.shortcuts import redirect
-from django.shortcuts import render
+from django.core.paginator import Paginator
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
 
-from .forms import EditProfileForm
-from .forms import LoginForm
-from .forms import RegisterForm
-from .models import Skill
+from projects.models import Skill
+from .forms import EditProfileForm, LoginForm, RegisterForm
 from .models import User
+
 
 def register_view(request):
     if request.method == 'POST':
         form = RegisterForm(request.POST)
-
         if form.is_valid():
             user = form.save()
             login(request, user)
-
             return redirect('projects:project_list')
     else:
         form = RegisterForm()
-
-    return render(
-        request,
-        'users/register.html',
-        {'form': form},
-    )
+    context = {'form': form}
+    return render(request, 'users/register.html', context)
 
 
 def login_view(request):
+    error_message = None
     if request.method == 'POST':
         form = LoginForm(request.POST)
-
         if form.is_valid():
-            login(request, form.user)
-
-            return redirect('projects:project_list')
+            email = form.cleaned_data['email']
+            password = form.cleaned_data['password']
+            user = authenticate(request, email=email, password=password)
+            if user is not None:
+                login(request, user)
+                return redirect('projects:project_list')
+            error_message = 'Неверный email или пароль'
     else:
         form = LoginForm()
+    context = {
+        'form': form,
+        'error_message': error_message,
+    }
+    return render(request, 'users/login.html', context)
 
-    return render(
-        request,
-        'users/login.html',
-        {'form': form},
+
+def logout_view(request):
+    logout(request)
+    return redirect('projects:project_list')
+
+
+def user_list(request):
+    participants_list = User.objects.prefetch_related('skills').order_by('-id')
+    all_skills = Skill.objects.all().order_by('name')
+    active_skill = request.GET.get('skill', '')
+
+    if active_skill:
+        participants_list = participants_list.filter(
+            skills__name=active_skill
+        ).distinct()
+
+    paginator = Paginator(participants_list, 12)
+    page_number = request.GET.get('page')
+    page_obj = paginator.get_page(page_number)
+
+    query_prefix = f'skill={active_skill}&' if active_skill else ''
+
+    # Создаем список навыков с флагом is_active для каждого
+    skills_with_active = []
+    for skill in all_skills:
+        skills_with_active.append({
+            'name': skill.name,
+            'is_active': (skill.name == active_skill)
+        })
+
+    context = {
+        'page_obj': page_obj,
+        'all_skills': all_skills,
+        'skills_with_active': skills_with_active,
+        'active_skill': active_skill,
+        'query_prefix': query_prefix,
+    }
+    return render(request, 'users/participants.html', context)
+
+
+def user_detail(request, user_id):
+    profile_user = get_object_or_404(
+        User.objects.prefetch_related('skills', 'owned_projects'),
+        id=user_id,
     )
+    context = {'user': profile_user}
+    return render(request, 'users/user-details.html', context)
+
+
+@login_required
+def edit_profile(request):
+    if request.method == 'POST':
+        form = EditProfileForm(
+            request.POST, request.FILES, instance=request.user
+        )
+        if form.is_valid():
+            form.save()
+            return redirect('users:user_detail', user_id=request.user.id)
+    else:
+        form = EditProfileForm(instance=request.user)
+    context = {'form': form}
+    return render(request, 'users/edit_profile.html', context)
+
+
+@login_required
+def change_password(request):
+    if request.method == 'POST':
+        form = PasswordChangeForm(request.user, request.POST)
+        if form.is_valid():
+            user = form.save()
+            update_session_auth_hash(request, user)
+            return redirect('users:user_detail', user_id=request.user.id)
+    else:
+        form = PasswordChangeForm(request.user)
+    context = {'form': form}
+    return render(request, 'users/change_password.html', context)
+
+
+def user_skills_search(request):
+    """Автодополнение навыков для пользователя"""
+    query = request.GET.get('q', '')
+    if len(query) < 1:
+        return JsonResponse([], safe=False)
+
+    skills = Skill.objects.filter(
+        name__icontains=query
+    ).order_by('name')[:10]
+    data = [{'id': skill.id, 'name': skill.name} for skill in skills]
+    return JsonResponse(data, safe=False)
+
+
+@login_required
+@require_http_methods(["POST"])
+@csrf_exempt
+def add_user_skill(request, user_id):
+    """Добавление навыка пользователю"""
+    if request.user.id != user_id:
+        return JsonResponse({'error': 'Forbidden'}, status=403)
+
+    user = get_object_or_404(User, id=user_id)
+
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    skill_id = data.get('skill_id') or request.POST.get('skill_id')
+    name = data.get('name') or request.POST.get('name')
+    created = False
+    added = False
+
+    if skill_id:
+        try:
+            skill = Skill.objects.get(id=skill_id)
+        except Skill.DoesNotExist:
+            return JsonResponse({'error': 'Skill not found'}, status=404)
+    else:
+        skill, created = Skill.objects.get_or_create(name=name)
+
+    if skill not in user.skills.all():
+        user.skills.add(skill)
+        added = True
+
+    return JsonResponse({
+        'id': skill.id,
+        'name': skill.name,
+        'created': created,
+        'added': added,
+    })
+
+
+@login_required
+@require_http_methods(["POST"])
+@csrf_exempt
+def remove_user_skill(request, user_id, skill_id):
+    """Удаление навыка у пользователя"""
+    if request.user.id != user_id:
+        return JsonResponse({'error': 'Forbidden'}, status=403)
+
+    user = get_object_or_404(User, id=user_id)
+    skill = get_object_or_404(Skill, id=skill_id)
+    user.skills.remove(skill)
+    return JsonResponse({'status': 'ok'})

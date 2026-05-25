@@ -1,3 +1,6 @@
+import random
+from io import BytesIO
+
 from django.contrib.auth.models import (
     AbstractBaseUser,
     BaseUserManager,
@@ -6,9 +9,7 @@ from django.contrib.auth.models import (
 from django.core.files.base import ContentFile
 from django.db import models
 from django.utils import timezone
-from io import BytesIO
 from PIL import Image, ImageDraw
-import random
 
 
 class UserManager(BaseUserManager):
@@ -17,18 +18,15 @@ class UserManager(BaseUserManager):
             raise ValueError('Email is required')
 
         email = self.normalize_email(email)
-
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
-
         return user
 
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_active', True)
-
         return self.create_user(email, password, **extra_fields)
 
 
@@ -46,27 +44,21 @@ class Skill(models.Model):
 
 
 class User(AbstractBaseUser, PermissionsMixin):
-    email = models.EmailField(
-        unique=True,
-    )
-    name = models.CharField(
-        max_length=124,
-    )
-    surname = models.CharField(
-        max_length=124,
-    )
+    email = models.EmailField(unique=True)
+    name = models.CharField(max_length=124)
+    surname = models.CharField(max_length=124)
     avatar = models.ImageField(
         upload_to='avatars/',
         blank=True,
     )
     phone = models.CharField(
-        max_length=12,
+        max_length=20,
         unique=True,
         blank=True,
+        null=True,
+        default=None,
     )
-    github_url = models.URLField(
-        blank=True,
-    )
+    github_url = models.URLField(blank=True)
     about = models.TextField(
         max_length=256,
         blank=True,
@@ -76,15 +68,9 @@ class User(AbstractBaseUser, PermissionsMixin):
         related_name='users',
         blank=True,
     )
-    is_active = models.BooleanField(
-        default=True,
-    )
-    is_staff = models.BooleanField(
-        default=False,
-    )
-    created_at = models.DateTimeField(
-        default=timezone.now,
-    )
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    created_at = models.DateTimeField(default=timezone.now)
 
     objects = UserManager()
 
@@ -100,40 +86,24 @@ class User(AbstractBaseUser, PermissionsMixin):
     def save(self, *args, **kwargs):
         if not self.avatar:
             self.generate_avatar()
-
         super().save(*args, **kwargs)
 
     def generate_avatar(self):
         colors = [
-            '#8E9AAF',
-            '#A4C3B2',
-            '#84A59D',
-            '#95B8D1',
+            '#8E9AAF', '#A4C3B2', '#84A59D', '#95B8D1',
         ]
-
-        image = Image.new(
-            'RGB',
-            (200, 200),
-            random.choice(colors),
-        )
-
+        image = Image.new('RGB', (200, 200), random.choice(colors))
         draw = ImageDraw.Draw(image)
 
         first_letter = self.name[0].upper()
+        draw.text((80, 70), first_letter, fill='white')
 
-        draw.text(
-            (80, 70),
-            first_letter,
-            fill='white',
-        )
+        # TeamFinder by Elina Zezaeva - особенность проекта
+        draw.text((10, 180), 'EZ', fill='white')
 
         buffer = BytesIO()
         image.save(buffer, format='PNG')
-
-        filename = (
-            f'{self.name.lower()}_avatar.png'
-        )
-
+        filename = f'{self.name.lower()}_avatar.png'
         self.avatar.save(
             filename,
             ContentFile(buffer.getvalue()),
